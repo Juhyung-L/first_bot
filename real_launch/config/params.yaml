@@ -1,0 +1,30 @@
+filter_node:
+  ros__parameters:
+    use_sim_time: False
+    odom_topic: "odom_delta"
+    odom_covariance: [
+      1.75e-6, 0.0, 0.0,
+      0.0, 1.75e-6, 0.0,
+      0.0, 0.0, 2.38e-5
+    ]
+    imu_topic: "imu"
+    imu_covariance: [
+      0.166229, -0.00015777, 0.000309815, 
+      -0.00015777, 3.06851e-05, 7.11287e-08, 
+      0.000309815, 7.11287e-08, 6.31037e-05
+    ]
+    process_noise: [
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2,
+      1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2
+    ]
+microcontroller_interface:
+  ros__parameters:
+    odom_port: "/dev/ttyACM0"
+    imu_port: "/dev/ttyUSB0"
+    
