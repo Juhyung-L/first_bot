@@ -1,4 +1,3 @@
 std_msgs/Header header
-float64 x
-float64 y
-float64 yaw
+msg_2d/Pose pose
+msg_2d/Velocity velocity

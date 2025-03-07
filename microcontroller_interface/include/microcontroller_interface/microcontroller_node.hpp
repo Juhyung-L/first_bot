@@ -156,9 +156,7 @@ public:
     : SerialWrapper(nh, port_name, topic_name, frame_id)
     {
         auto node = nh.lock();
-        odom_raw_pub_ = node->create_publisher<msg_2d::msg::OdometryStamped>("odom_raw", rclcpp::SystemDefaultsQoS());
-
-        odom_raw_data_.header.frame_id = frame_id;
+        pose_raw_pub_ = node->create_publisher<msg_2d::msg::Pose>("raw_pose", rclcpp::SystemDefaultsQoS());
     }
 
     ~OdomSerial() override
@@ -168,12 +166,12 @@ protected:
     void readData() override
     {
         // the teensy will send
-        // [delta x, delta y, delta yaw, x, y, z]
+        // [delta x, delta y, delta yaw, vx, vy, vyaw, x, y, z]
         // x y z are in world frame
-        // delta x y z are in robot frame
-        // normally, it should only send delta data, but I am going to compare the accuracy of
+        // delta x y z and vx vy vyaw are in robot frame
+        // normally, it should only send delta and velocity data, but I am going to compare the accuracy of
         // wheel encoder odometry vs. wheel encoder + IMU EKF fusion
-        size_t num_data = 6;
+        size_t num_data = 9;
         DataBuffer buffer;
         serial_port_.Read(buffer, num_data*sizeof(double), serial_port_timeout_ms_);
 
@@ -189,22 +187,24 @@ protected:
             doubles[i] = bd.val;
         }
         
-        // delta x y yaw
-        data_.x = doubles[0];
-        data_.y = doubles[1];
-        data_.yaw = doubles[2];
+        // delta x y yaw vx vy vyaw
+        data_.pose.x = doubles[0];
+        data_.pose.y = doubles[1];
+        data_.pose.yaw = doubles[2];
+        data_.velocity.vx = doubles[3];
+        data_.velocity.vy = doubles[4];
+        data_.velocity.vyaw = doubles[5];
 
         // x y yaw
-        odom_raw_data_.x = doubles[3];
-        odom_raw_data_.y = doubles[4];
-        odom_raw_data_.yaw = doubles[5];
-        odom_raw_data_.header.stamp = clock_->now();
-        odom_raw_pub_->publish(odom_raw_data_);
+        pose_raw_.x = doubles[6];
+        pose_raw_.y = doubles[7];
+        pose_raw_.yaw = doubles[8];
+        pose_raw_pub_->publish(pose_raw_);
     }
 
 private:
-    rclcpp::Publisher<msg_2d::msg::OdometryStamped>::SharedPtr odom_raw_pub_;
-    msg_2d::msg::OdometryStamped odom_raw_data_;
+    rclcpp::Publisher<msg_2d::msg::Pose>::SharedPtr pose_raw_pub_;
+    msg_2d::msg::Pose pose_raw_;
 };
 
 class IMUSerial : public SerialWrapper<msg_2d::msg::ImuStamped>

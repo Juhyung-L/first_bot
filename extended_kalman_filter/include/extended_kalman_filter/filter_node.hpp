@@ -4,11 +4,16 @@
 #include <chrono>
 #include <memory>
 #include <queue>
+#include <mutex>
+
 #include <Eigen/Dense>
 
 #include "rclcpp/rclcpp.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "tf2/LinearMath/Quaternion.h"
 #include "msg_2d/msg/imu_stamped.hpp"
 #include "msg_2d/msg/odometry_stamped.hpp"
+#include "msg_2d/msg/pose.hpp"
 #include "extended_kalman_filter/ekf.hpp"
 
 Eigen::Matrix<double, ODOM_MEASUREMENT_SIZE, ODOM_MEASUREMENT_SIZE> ODOM_COVARIANCE;
@@ -16,32 +21,18 @@ Eigen::Matrix<double, IMU_MEASUREMENT_SIZE, IMU_MEASUREMENT_SIZE> IMU_COVARIANCE
 Eigen::Matrix<double, ODOM_MEASUREMENT_SIZE, STATE_SIZE> ODOM_OBSERVATION_MATRIX;
 Eigen::Matrix<double, IMU_MEASUREMENT_SIZE, STATE_SIZE> IMU_OBSERVATION_MATRIX;
 
-enum OdomMember
-{
-    OdomX = 0,
-    OdomY,
-    OdomYaw
-};
-
-enum ImuMember
-{
-    ImuYaw = 0,
-    ImuAx,
-    ImuAy
-};
-
 class FilterNode : public rclcpp::Node
 {
 public:
     // this filter will take in:
-    // - delta x, y, and yaw from odometry
+    // - delta x, y, yaw, vx, vy, and vyaw from wheel odometry
     // - accel x, accel y, and yaw from IMU
     FilterNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
     : Node("filter_node", options)
     {
         declare_parameter("odom_topic", "odom_delta");
         declare_parameter("imu_topic", "imu");
-        declare_parameter("filtered_odom_topic", "filtered_odom");
+        declare_parameter("filtered_pose_topic", "filtered_pose");
 
         declare_parameter("odom_covariance", rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY);
         declare_parameter("imu_covariance", rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY);
@@ -84,35 +75,35 @@ public:
         ODOM_OBSERVATION_MATRIX(OdomX, StateX) = 1.0;
         ODOM_OBSERVATION_MATRIX(OdomY, StateY) = 1.0;
         ODOM_OBSERVATION_MATRIX(OdomYaw, StateYaw) = 1.0;
+        ODOM_OBSERVATION_MATRIX(OdomVx, StateVx) = 1.0;
+        ODOM_OBSERVATION_MATRIX(OdomVy, StateVy) = 1.0;
+        ODOM_OBSERVATION_MATRIX(OdomVyaw, StateVyaw) = 1.0;
         IMU_OBSERVATION_MATRIX = Eigen::Matrix<double, IMU_MEASUREMENT_SIZE, STATE_SIZE>::Zero();
-        IMU_OBSERVATION_MATRIX(OdomX, StateYaw) = 1.0;
-        IMU_OBSERVATION_MATRIX(OdomY, StateAx) = 1.0;
-        IMU_OBSERVATION_MATRIX(OdomYaw, StateAy) = 1.0;
+        IMU_OBSERVATION_MATRIX(ImuYaw, StateYaw) = 1.0;
+        IMU_OBSERVATION_MATRIX(ImuAx, StateAx) = 1.0;
+        IMU_OBSERVATION_MATRIX(ImuAy, StateAy) = 1.0;
 
-        odom_topic_ = get_parameter("odom_topic").as_string();
-        imu_topic_ = get_parameter("imu_topic").as_string();
-        filtered_odom_topic_ = get_parameter("filtered_odom_topic").as_string();
+        std::string odom_topic_ = get_parameter("odom_topic").as_string();
+        std::string imu_topic_ = get_parameter("imu_topic").as_string();
+        std::string filtered_pose_topic_ = get_parameter("filtered_pose_topic").as_string();
         
         odom_sub_ = create_subscription<msg_2d::msg::OdometryStamped>(
             odom_topic_, rclcpp::SystemDefaultsQoS(), std::bind(&FilterNode::odomMeasurementCB, this, std::placeholders::_1));
         imu_sub_ = create_subscription<msg_2d::msg::ImuStamped>(
             imu_topic_, rclcpp::SystemDefaultsQoS(), std::bind(&FilterNode::imuMeasurementCB, this, std::placeholders::_1));
         
-        filtered_odom_pub_ = create_publisher<msg_2d::msg::OdometryStamped>(
-            filtered_odom_topic_, rclcpp::SystemDefaultsQoS());
+        filtered_pose_pub_ = create_publisher<msg_2d::msg::Pose>(
+            filtered_pose_topic_, rclcpp::SystemDefaultsQoS());
 
         int filter_period_ms = get_parameter("filter_period_ms").as_int();
         timer_ = create_wall_timer(std::chrono::milliseconds(filter_period_ms), std::bind(&FilterNode::updateAndPublish, this));
     }
 
 private:
-    std::string odom_topic_;
-    std::string imu_topic_;
-    std::string filtered_odom_topic_;
 
     rclcpp::Subscription<msg_2d::msg::OdometryStamped>::SharedPtr odom_sub_;
     rclcpp::Subscription<msg_2d::msg::ImuStamped>::SharedPtr imu_sub_;
-    rclcpp::Publisher<msg_2d::msg::OdometryStamped>::SharedPtr filtered_odom_pub_;
+    rclcpp::Publisher<msg_2d::msg::Pose>::SharedPtr filtered_pose_pub_;
     
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -120,13 +111,30 @@ private:
 
     void odomMeasurementCB(const msg_2d::msg::OdometryStamped& odom_msg)
     {
+        // becuase this odom is the change in position since last measurement (delta)
+        // we need to add the filter's current state to the measurement
+        // as well as the state's covariance  to the measurement covariance
+        std::lock_guard<std::mutex> lock(ekf_.state_mtx_);
+
         Measurement::SharedPtr msg = std::make_shared<Measurement>();
         msg->measurement_ = Eigen::Vector<double, ODOM_MEASUREMENT_SIZE>();
-        msg->measurement_(OdomX) = odom_msg.x;
-        msg->measurement_(OdomY) = odom_msg.y;
-        msg->measurement_(OdomX) = odom_msg.yaw;
+
+        // convert delta x and y to world frame
+        double sin_yaw = std::sin(ekf_.state_(StateYaw));
+        double cos_yaw = std::cos(ekf_.state_(StateYaw));
+        double x = odom_msg.pose.x*cos_yaw - odom_msg.pose.y*sin_yaw;
+        double y = odom_msg.pose.x*sin_yaw + odom_msg.pose.y*cos_yaw;
+
+        msg->measurement_(OdomX) = x + ekf_.state_(StateX);
+        msg->measurement_(OdomY) = y + ekf_.state_(StateY);
+        msg->measurement_(OdomYaw) = odom_msg.pose.yaw + ekf_.state_(StateYaw);
+        msg->measurement_(OdomVx) = odom_msg.velocity.vx;
+        msg->measurement_(OdomVy) = odom_msg.velocity.vy;
+        msg->measurement_(OdomVyaw) = odom_msg.velocity.vyaw;
 
         msg->covariance_ = ODOM_COVARIANCE;
+        msg->covariance_.block<ODOM_POSE_SIZE, ODOM_POSE_SIZE>(0, 0) += 
+            ekf_.covariance_.block<ODOM_POSE_SIZE, ODOM_POSE_SIZE>(0, 0);
         msg->observation_matrix_ = ODOM_OBSERVATION_MATRIX;
         msg->data_type_ = Odom;
         msg->time_ = odom_msg.header.stamp;
@@ -154,16 +162,12 @@ private:
     {
         ekf_.predictUpdateCycle();
 
-        // TODO publish transform
-        // msg_2d::msg::OdometryStamped filtered_odom;
-        // filtered_odom.header.frame_id = "odom";
-        // filtered_odom.header.stamp = now();
-        // Eigen::Vector<double, STATE_SIZE> state = ekf_.getState();
+        msg_2d::msg::Pose cur_pose;
+        cur_pose.x = ekf_.state_(StateX);
+        cur_pose.y = ekf_.state_(StateY);
+        cur_pose.yaw = ekf_.state_(StateYaw);
 
-        // filtered_odom.x = state(StateX);
-        // filtered_odom.y = state(StateY);
-        // filtered_odom.yaw = state(StateYaw);
-        // filtered_odom_pub_->publish(filtered_odom);
+        filtered_pose_pub_->publish(cur_pose);
     }
 };
 

@@ -7,6 +7,8 @@ find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(msg_2d
+  "msg/Pose.msg"
+  "msg/Velocity.msg"
   "msg/OdometryStamped.msg"
   "msg/ImuStamped.msg"
   DEPENDENCIES std_msgs

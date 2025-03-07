@@ -1,20 +1,22 @@
 #ifndef EKF_HPP_
 #define EKF_HPP_
 
-#include <iostream>
 #include <queue>
 #include <cmath>
+#include <mutex>
 
 #include <Eigen/Dense>
 
 #include "rclcpp/rclcpp.hpp"
+#include "angles/angles.h"
 
-Eigen::IOFormat fmt(4, 0, ", ", "\n", "[", "]");
-std::string sep{"/-----------------------------------------/"};
+// Eigen::IOFormat fmt(4, 0, ", ", "\n", "[", "]");
+// std::string sep{"/-----------------------------------------/"};
 
 const int STATE_SIZE = 8; // x y z vx vy vyaw ax ay
-const int ODOM_MEASUREMENT_SIZE = 3; // x y yaw
+const int ODOM_MEASUREMENT_SIZE = 6; // x y yaw vx vy vyaw
 const int IMU_MEASUREMENT_SIZE = 3; // yaw ax ay
+const int ODOM_POSE_SIZE = 3; // x y yaw
 
 enum StateMember
 {
@@ -26,6 +28,23 @@ enum StateMember
     StateVyaw,
     StateAx,
     StateAy
+};
+
+enum OdomMember
+{
+    OdomX = 0,
+    OdomY,
+    OdomYaw,
+    OdomVx,
+    OdomVy,
+    OdomVyaw
+};
+
+enum ImuMember
+{
+    ImuYaw = 0,
+    ImuAx,
+    ImuAy
 };
 
 enum DataType
@@ -56,7 +75,7 @@ public:
     EKF()
     {
         state_ = Eigen::Vector<double, STATE_SIZE>::Zero();
-        covariance_ = Eigen::Matrix<double, STATE_SIZE, STATE_SIZE>::Ones();
+        covariance_ = Eigen::Matrix<double, STATE_SIZE, STATE_SIZE>::Identity();
         covariance_ *= 1e-2; // initialize covariance to 0.01
 
         transfer_function_ = Eigen::Matrix<double, STATE_SIZE, STATE_SIZE>::Identity();
@@ -72,9 +91,9 @@ public:
 
     void predictUpdateCycle()
     {
+        std::lock_guard<std::mutex> lock(state_mtx_);
         while (!measurement_queue_.empty())
         {
-            std::cout << "Iteration: " << count <<std::endl; // TODO delete after debug
             Measurement::SharedPtr msg = measurement_queue_.top();
             measurement_queue_.pop();
 
@@ -90,50 +109,48 @@ public:
             update(msg);
 
             cur_time_ = msg->time_;
-            ++count; // TODO delete after debug
         }
     }
 
-    Eigen::VectorXd getState()
-    {
-        return state_;
-    }
-
     std::priority_queue<Measurement::SharedPtr, std::vector<Measurement::SharedPtr>, Measurement> measurement_queue_;
-private:
-    rclcpp::Time cur_time_{0};
-    int count {0}; // TODO delete after debug
-
     Eigen::Vector<double, STATE_SIZE> state_;
     Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> covariance_;
+    std::mutex state_mtx_;
+
+private:
+    rclcpp::Time cur_time_{0};
+
     Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> transfer_function_;
     Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> transfer_function_jacobian_;
     Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> process_noise_;
     Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> identity_;
     Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> I_KH_;
-    Eigen::Matrix<double, STATE_SIZE, STATE_SIZE> I_KH_T_;
 
     void predict(const rclcpp::Duration& duration)
     {
+        // duration = duration since last call to this function
+        // this function combines the change in robot's pose since last time stamp given by
+        // odom and the kinematic model using the Maximum Likelihood Estimation (MLE)
+
         // set up transfer function
         double yaw = state_(StateYaw);
-        double cos_yaw = std::cos(yaw);
         double sin_yaw = std::sin(yaw);
+        double cos_yaw = std::cos(yaw);
         double delta_T = duration.seconds();
 
-        covariance_(StateX, StateVx) = cos_yaw * delta_T;
-        covariance_(StateX, StateVy) = -sin_yaw * delta_T;
-        covariance_(StateX, StateAx) = 0.5 * covariance_(StateX, StateVx) * delta_T;
-        covariance_(StateX, StateAy) = 0.5 * covariance_(StateX, StateVy) * delta_T;
+        transfer_function_(StateX, StateVx) = cos_yaw * delta_T;
+        transfer_function_(StateX, StateVy) = -sin_yaw * delta_T;
+        transfer_function_(StateX, StateAx) = 0.5 * transfer_function_(StateX, StateVx) * delta_T;
+        transfer_function_(StateX, StateAy) = 0.5 * transfer_function_(StateX, StateVy) * delta_T;
 
-        covariance_(StateY, StateVx) = sin_yaw * delta_T;
-        covariance_(StateY, StateVy) = cos_yaw * delta_T;
-        covariance_(StateY, StateAx) = 0.5 * covariance_(StateX, StateVx) * delta_T;
-        covariance_(StateY, StateAy) = 0.5 * covariance_(StateX, StateVy) * delta_T;
+        transfer_function_(StateY, StateVx) = sin_yaw * delta_T;
+        transfer_function_(StateY, StateVy) = cos_yaw * delta_T;
+        transfer_function_(StateY, StateAx) = 0.5 * transfer_function_(StateX, StateVx) * delta_T;
+        transfer_function_(StateY, StateAy) = 0.5 * transfer_function_(StateX, StateVy) * delta_T;
     
-        covariance_(StateYaw, StateVyaw) = delta_T;
-        covariance_(StateVx, StateAx) = delta_T;
-        covariance_(StateVy, StateAy) = delta_T;
+        transfer_function_(StateYaw, StateVyaw) = delta_T;
+        transfer_function_(StateVx, StateAx) = delta_T;
+        transfer_function_(StateVy, StateAy) = delta_T;
 
         // set up transfer function jacobian
         double vx = state_(StateVx);
@@ -152,20 +169,12 @@ private:
         state_ = transfer_function_ * state_;
 
         // update covariance
-        covariance_ = transfer_function_jacobian_ * covariance_ * transfer_function_jacobian_.transpose() + process_noise_;
+        covariance_ = 
+            transfer_function_jacobian_ * covariance_ * transfer_function_jacobian_.transpose() + process_noise_;
         
-        // wrap angles
-        state_(StateYaw) = wrapAngle(state_(StateYaw));
-        state_(StateVyaw) = wrapAngle(state_(StateVyaw));
-
-        // TODO delete after debug
-        std::cout << "Predict" << sep << std::endl;
-        std::cout << "Delta T: " << delta_T << std::endl;
-        std::cout << "State: \n";
-        std::cout << state_.format(fmt) << std::endl;
-        std::cout << "Covariance: \n";
-        std::cout << covariance_.format(fmt) << std::endl;
-        std::cout << sep << std::endl;
+        // wrap state angles
+        angles::normalize_angle(state_(StateYaw));
+        angles::normalize_angle(state_(StateVyaw));
     }
 
     void update(const Measurement::SharedPtr msg)
@@ -174,44 +183,29 @@ private:
         if (msg->data_type_ == Odom) {measurement_size = ODOM_MEASUREMENT_SIZE;}
         else if (msg->data_type_ == Imu) {measurement_size = IMU_MEASUREMENT_SIZE;}
         
-        // calculate kalman gain
+        // calculate kalman gain K = (PH') / (HPH' + R)
         Eigen::MatrixXd kalman_gain(STATE_SIZE, measurement_size);
-        Eigen::MatrixXd observation_transpose = msg->observation_matrix_.transpose();
-        kalman_gain = 
-            covariance_ * observation_transpose * (msg->observation_matrix_ * covariance_ * observation_transpose + msg->covariance_).inverse();
-    
-        // update state
-        state_ = state_ + kalman_gain * (msg->measurement_ - msg->observation_matrix_ * state_);
+        Eigen::MatrixXd pht = covariance_ * msg->observation_matrix_.transpose();
+        Eigen::MatrixXd hphr_inverse = (msg->observation_matrix_ * pht + msg->covariance_).inverse();
+        kalman_gain.noalias() = pht * hphr_inverse;
+
+        // update state x = x _ K(z - Hx)
+        Eigen::MatrixXd innovation = (msg->measurement_ - msg->observation_matrix_ * state_);
+        if (msg->data_type_ == Odom)
+        {
+            innovation(OdomYaw) = angles::normalize_angle(innovation(OdomYaw));
+        }
+        else if (msg->data_type_ == Imu)
+        {
+            innovation(ImuYaw) = angles::normalize_angle(innovation(ImuYaw));
+        }
+        state_.noalias() += kalman_gain * innovation;
 
         // update covariance
         I_KH_ = identity_ - kalman_gain * msg->observation_matrix_;
-        I_KH_T_ = I_KH_.transpose();
-        covariance_ = I_KH_ * covariance_ * I_KH_T_ + kalman_gain * msg->covariance_ * kalman_gain.transpose();
-        
-        // TODO delete after debug
-        std::string data_type = (msg->data_type_==Odom) ? "Odom" : "Imu";
-        std::cout << "Update" << sep << std::endl;
-        std::cout << "Measurement {" << data_type << "}: \n";
-        std::cout << msg->measurement_.format(fmt) << std::endl;
-        std::cout << "State: \n";
-        std::cout << state_.format(fmt) << std::endl;
-        std::cout << "Covariance: \n";
-        std::cout << covariance_.format(fmt) << std::endl;
-        std::cout << sep << std::endl;
+        covariance_ = I_KH_ * covariance_ * I_KH_.transpose();
+        covariance_.noalias() += kalman_gain * msg->covariance_ * kalman_gain.transpose();
     }
-
-    // wrap anglesto [-pi, pi]
-    double wrapAngle(double rad)
-    {
-        constexpr double _2_PI = 2* M_PI;
-        rad = std::fmod(rad + M_PI, _2_PI);
-        if (rad < 0.0)
-        {
-            rad += _2_PI;
-        }
-        return rad - M_PI;
-    }
-
 };
 
 #endif
