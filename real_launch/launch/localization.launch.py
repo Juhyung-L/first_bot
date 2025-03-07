@@ -36,13 +36,7 @@ def generate_launch_description():
                 name='filter_node',
                 output='screen',
                 parameters=[{'use_sim_time': use_sim_time},
-                            params_file]),
-            Node(
-                package='extended_kalman_filter',
-                executable='visualizer',
-                name='visualizer',
-                output='screen'
-            )
+                            params_file])
         ]
     )
 

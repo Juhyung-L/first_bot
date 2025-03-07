@@ -15,6 +15,8 @@
   <depend>rclcpp</depend>
   <depend>geometry_msgs</depend>
   <depend>msg_2d</depend>
+  <depend>tf2</depend>
+  <depend>libserial-dev</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
